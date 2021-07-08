@@ -1,0 +1,77 @@
+//the classification algorithm used to classify the image in our paper. 
+//this code uses two inputs, the image to be classified (which is one of the threshold outputs)
+// and the ground truth data, these are points
+//which are supplied in the supplimentary data.  they consist of a location (X, Y) and class, which are names 
+//of the columns, and an ID column to identify the pixel.  
+
+//sets the area of interest
+var roi = geometry
+
+//add the ground truth points to the map
+Map.addLayer(table)
+
+//mask pixels which are flagged as no change in the image
+var mask = image.updateMask(image.select('b1').neq(-5))
+
+
+//select the bands which we want to use in the classification
+//in our paper they are the amplitude before and after, and the trend level before and after change. 
+//other bands may be easily used in this variable
+var bands = ['b2', 'b5', 'b10', 'b11']
+
+//selects the bands which we will use and disregards the rest
+var select = mask.select(bands);
+print(select)
+
+
+
+// Get the values for all pixels in each point in the training data.
+var training = select.sampleRegions({
+  collection: table,
+  properties: ['class'],
+  // Set the scale to get Landsat pixels in the polygons.
+  scale: 30
+});
+
+// Make a Random Forest classifier and train it.  300 trees were used, all other 
+//parameters are default. these can be easily changed here, similarly different classifiers can be used here
+var classifier_1 = ee.Classifier.smileRandomForest(300)
+    .train(training, 'class');
+
+// Classify the input imagery.
+var classified_1 = mask.classify(classifier_1);
+
+//add the classified image to the map
+Map.addLayer(classified_1, [], 'classified')
+
+// Export the image.  no data pixels are set to -5.  
+Export.image.toDrive({
+  image: classified_1.unmask(-5),
+  description: 'classified_image_smile',
+  scale: 30,
+  region: roi
+});
+
+print(classifier_1)
+
+
+
+//this code downloads the values of all bands of pixels which are used in the
+//training data
+ 
+//removes all pixels which have already been identified as no change
+var mask = image.updateMask(image.select('b1').neq(-5));
+
+//adds the change pixels to the map for visualisation
+Map.addLayer(mask);
+//adds the ground truth points to the map for visualisation
+Map.addLayer(table);
+
+//selects the pixels which are selected as ground truth points
+var samples = mask.sampleRegions(table);
+
+
+print(samples);
+
+//exports the band values of the ground truth points to google drive
+Export.table.toDrive(samples);

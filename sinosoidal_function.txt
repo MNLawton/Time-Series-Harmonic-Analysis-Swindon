@@ -1,0 +1,645 @@
+//note: this code produces images based on the entire time series from 1984 to 2018
+//the second code file takes these images, filters to the time period you wish to analyse for change,
+//and detects change based on a threshold.  therefore the dates used in this code are for the construction of the models, not 
+//the period of change you wish to analyse, although these may coincide.  
+ 
+//please change the following things to vary the period of study and the location of study:
+//start_time = the date of the first image you wish to include in construction of the model
+//end_time = the date of the final image you wish to include in construction of the model
+//note: the above is not the period of change you wish to analyse, merely the dates from which you wish to construct the sinosoidal functions from
+
+//roi and poi: these can be modified using the in GEE geometry tools to your study area.
+
+//years: this is a list which goes from 1 to y, where y = the whole number of years between start_time and end_time.  this
+//creates a list with each element an interval of one year between the start_date and end_date
+
+//the initation line of the loop: for (var i=0; i<33; i+=1)
+//the loop takes the element in the position of i within the list. eg, in our example, i=5 returns the date 1989
+//the end point of the loop is one iteration before the end_time (ie the second to last element in the list),
+//and the step is 1 so that each step is one year (this will work with whole numbers, 
+//but the "years" variable will need to be altered to include months if part of a year
+//is to be investiated). change i=0 and i<33 (which is y-1 from "years") to change
+//which iterations are calculated
+
+//note: year_date adds i to 1985 to set the system time of each image to a year.  if you were to modify the code to 
+//include previous landsat missions, this would have to be changed appropriately
+
+//change the output file names appropriately, as these will be used in the next set of code
+//also you may wish to change the value of "no data", here it is set to a default of -5
+
+
+
+//define start and end dates to create the model
+var start_time = ee.Date('1984-01-01');
+var end_time= ee.Date('2018-01-01');
+
+//edit this number to change the year of the first break (must be at least one year after the start date)
+var year_of_first_break = ee.Number(1985);
+
+// Set the region of interest to create a map
+var roi = study_area; 
+//set the point of interest as a pixel you wish to analyise in depth
+var poi = single_pixel;
+Map.centerObject(roi, 15);
+
+//creates a list of the years you are going to put the splits
+// it starts at 1 as you cant split it at the first year, final number is 1+ the number of years
+var years = ee.List.sequence(1, 34);
+
+//filters landsat 5 collection to time period and region of interest
+var landsat5 = ee.ImageCollection('LANDSAT/LT05/C01/T1_SR')
+.filterDate(start_time, end_time)
+.filterBounds(roi);
+
+//filters landsat 7 collection to time period and region of interest
+var landsat7 = ee.ImageCollection('LANDSAT/LE07/C01/T1_SR')
+.filterDate(start_time, end_time)
+.filterBounds(roi);
+  
+//filters landsat 8 collection to time period and region of interest
+var landsat_8 = ee.ImageCollection('LANDSAT/LC08/C01/T1_SR')
+.filterDate(start_time, end_time)
+.filterBounds(roi);
+  
+/////////////////////////////////
+//the cloud masks and ndvi and number of cloud free images
+////////////////////////////////
+  
+// mask clouds in landsat 8
+var maskClouds_L8 = function(image) {
+  var cloudShadowBitMask = 1 << 3;
+  var cloudsBitMask = 1 << 5;
+  var qa = image.select('pixel_qa');
+  var mask = qa.bitwiseAnd(cloudShadowBitMask).eq(0)
+      .and(qa.bitwiseAnd(cloudsBitMask).eq(0));
+  return image.updateMask(mask).divide(10000)
+      .select("B[0-9]*")
+      .copyProperties(image, ["system:time_start"]);
+} 
+
+// Function to add an NDVI band, the dependent variable to landsat 8.
+var addNDVI_L8 = function(image) {
+  return image
+    .addBands(image.normalizedDifference(['B5', 'B4'])
+    .rename('NDVI'))
+    .float();
+};
+
+//applly landsat 8 cloud mask and ndvi function
+var landsat_masked = landsat_8.map(maskClouds_L8).map(addNDVI_L8).select('NDVI');
+
+
+// calculate ndvi in landsat 5 and 7
+var addNDVI_l5 = function(image) {
+  return image
+    .addBands(image.normalizedDifference(['B4', 'B3'])
+    .rename('NDVI'))
+    .float();
+};
+
+
+//function to mask clouds in landsat 5 and 7
+var landsat_5_mask = function(image) {
+  var qa = image.select('pixel_qa');
+  var cloud = qa.bitwiseAnd(1 << 5)
+          .and(qa.bitwiseAnd(1 << 7))
+          .or(qa.bitwiseAnd(1 << 3));
+  var mask2 = image.mask().reduce(ee.Reducer.min());
+  return image.updateMask(cloud.not()).updateMask(mask2);
+};
+print(landsat_masked);
+
+
+  
+//merge landsat 5 and 7 collections
+var landsat_5_7 = ee.ImageCollection(landsat7.merge(landsat5));
+
+//apply cloud mask and calculate ndvi to combined landsat 5 and 7 collection
+var landsat_5_masked = landsat_5_7.map(landsat_5_mask).map(addNDVI_l5).select('NDVI');
+
+print(landsat_5_masked);
+
+//combine cloud masked landsat 5 and 7 with masked landsat 8
+var landsatCollection = ee.ImageCollection(landsat_masked.merge(landsat_5_masked));
+
+
+//counts the number of unmasked images in the collection and reduces it to a single image with a single band of count
+//called number of unmasked pixels
+var number_unmasked_pixels = landsatCollection.select("NDVI").count();//gets the collection and gets B1 and counts how many there is
+var unmasked_No = number_unmasked_pixels.select('NDVI').rename('number of unmasked pixels');
+
+///////////////////////////////////////////////////////
+//functions which are used in the calculation of the sinosoidal function
+//////////////////////////////////////////////////////
+
+// The dependent variable we are modeling.
+var dependent = 'NDVI';
+
+
+
+// The number of cycles per year to model.
+var harmonics = 1;
+
+
+// Make a list of harmonic frequencies to model and name band suffixes.
+var harmonicFrequencies = ee.List.sequence(1, harmonics);
+
+// Function to get a sequence of band names for harmonic terms.
+var constructBandNames = function(base, list) {
+  return ee.List(list).map(function(i) {
+    //below creates the name, first it takes the name of the band, in this case will be "cos"
+    //concatenate (cat.) joins two strings, so this joins the "cos" to the number which is cast
+    //as an int in the ee.Number bit
+    return ee.String(base).cat(ee.Number(i).int());
+  });
+};
+
+// Construct lists of names for the harmonic terms.
+//these names are used in the constuctbandnames function to create the appropriately named bands, 
+//based on the function and also whatever number is cast to "harmonics"
+var cosNamesBefore = constructBandNames('cos_', harmonicFrequencies);
+var sinNamesBefore = constructBandNames('sin_', harmonicFrequencies);
+
+// Independent variables.  this makes a list of the independents, basicially constant, t, cos_x, sin_x
+var independents = ee.List(['constant', 't'])
+  .cat(cosNamesBefore).cat(sinNamesBefore);
+
+
+
+// Function to add a time band.
+var addDependents = function(image) {
+  // Compute time in fractional years since the epoch.
+  var years = image.date().difference('1970-01-01', 'year');
+  var timeRadians = ee.Image(years.multiply(2 * Math.PI)).rename('t');
+  var constant = ee.Image(1);
+  return image.addBands(constant).addBands(timeRadians.float());
+};
+
+// Function to compute the specified number of harmonics
+// and add them as bands.  Assumes the time band is present.
+var addHarmonics = function(freqs) {
+  return function(image) {
+    // Make an image of frequencies. // creates an image with a constant value everwhere
+    var frequencies = ee.Image.constant(freqs);
+    // This band should represent time in radians.
+    var time = ee.Image(image).select('t');
+    // Get the cosine terms.
+    var cosinesBefore = time.multiply(frequencies).cos().rename(cosNamesBefore);
+    // Get the sin terms.
+    var sinesBefore = time.multiply(frequencies).sin().rename(sinNamesBefore);
+    return image.addBands(cosinesBefore).addBands(sinesBefore);
+  };
+};
+
+// Filter to the area of interest and add variables
+var harmonicLandsat = landsatCollection
+  .filterBounds(roi)
+  .map(addDependents)
+  .map(addHarmonics(harmonicFrequencies))
+  .sort('system:start_time');
+  
+
+  print(harmonicLandsat, 'harmonic landsat');
+  
+ 
+///////////////
+//functions to calculate RMSE
+///////////////
+
+//function to calcuate the difference of the model from real values
+var diff_of_dependent_and_fitted = function(image) {
+  var dependent_selection = image.select(dependent);
+  var model = image.select('fitted');
+  return image.addBands(
+    model.subtract(dependent_selection)
+    .rename('difference')
+    .float()
+)};
+
+//function to square the differences
+var square = function(image) {
+  var differences = image.select('difference');
+  return image.addBands(
+    differences.pow(2).rename('power'));
+};
+
+//specify the reducer
+var meanReducer = ee.Reducer.mean();
+
+////////////////////////////////////////////////////////
+//the loop for the change model
+////////////////////////////////////////////////////////
+
+//creates an empty list
+var empty_list = ee.List([]);
+
+
+
+//function creates a list of the years by advancing one year each time
+var time_list = years.map(function(d){
+//adds the list value to the start date, therefore start_time+1, start_time+2, .....
+  return start_time.advance(d, 'year');
+});
+
+print(time_list, 'time_list')
+
+
+
+
+//allows functions to be used in loops
+/*jshint loopfunc:true */
+
+//the loop 
+//it starts by taking the first date, which is a year after the start date
+// it ends at one year before the last year
+for (var i=0; i<33; i+=1) {
+  
+
+//this loop splits the time period into two, before and after an assumed time of change.
+//sinosoidal functions are created for the pair of time periods, the two collections are combined, and RMSE calculated  
+//the loop advances this break point one year, recalculates the model, and saves each iteration in emtpy_list
+
+
+//specifies that the ith element in time_list is a date
+  var time = ee.Date(time_list.get(i));
+
+//this gets the value of i, which is 0, 1, 2.... and sets it as a number
+var loop_i_num = ee.Number(i);
+
+//this adds "i" to 1985 which is the year that the model is running for
+//so 0+1985=1985, 1+1985=1986, 2+1985=1987...
+// and then sets it as a number
+//this equals the variable "time"
+var year_date = ee.Number(loop_i_num.add(year_of_first_break));
+
+
+//splits the image collection into two parts, before and after an assumed point of change
+var before = harmonicLandsat.filterDate(start_time, time);
+var after = harmonicLandsat.filterDate(time, end_time);
+
+
+
+/////////////////////////
+//before sinosoidal function
+////////////////////////
+
+//performs a linear regression to fit the line of best fit on the before date
+var harmonicTrend_before = before
+  .select(independents.add(dependent))
+  .reduce(ee.Reducer.robustLinearRegression(independents.length(), 1));
+
+//converts to an array image where each pixel is a 4*1 array.  project converts to a 
+//vector of lenght 4, and flatten converts each row into a new band.  the names are
+// given by calling them the corrisponding "independents" variable.  
+var harmonicTrendCoefficients_before = harmonicTrend_before.select('coefficients')
+  .arrayProject([0])
+  .arrayFlatten([independents]);
+
+//this function impliements the formula, where 
+//NDVI = b0 + b1*t + b2 cos(...) + b3 sin(...)
+//in this function the harmonicTrendCoefficients are the beta values calculated in the 
+//linear regression.these are multiplied by the independent variables which are 1, t, cos(...), and sin(...)
+var fittedHarmonic_before = before.map(function(image) {
+  return image.addBands(
+    image.select(independents)
+      .multiply(harmonicTrendCoefficients_before)
+      .reduce('sum')
+      .rename('fitted')
+      .float());
+});
+
+/////////////////////////
+//after sinosoidal function
+////////////////////////
+
+//performs a linear regression to fit the line of best fit on the after dates
+var harmonicTrend_after = after
+  .select(independents.add(dependent))
+  .reduce(ee.Reducer.robustLinearRegression(independents.length(), 1));
+
+var harmonicTrendCoefficients_after = harmonicTrend_after.select('coefficients')
+  .arrayProject([0])
+  .arrayFlatten([independents]);
+
+
+
+
+//this function basicially impliements the formula, where 
+//NDVI = b0 + b1*t + b2 cos(...) + b3 sin(...)
+//in this function the harmonicTrendCoefficients are the beta values calculated in the 
+//linear regression.these are multiplied by the independent variables which are 1, t, cos(...), and sin(...)
+var fittedHarmonic_after = after.map(function(image) {
+  return image.addBands(
+    image.select(independents)
+      .multiply(harmonicTrendCoefficients_after)
+      .reduce('sum')
+      .rename('fitted')
+      .float());
+});
+
+/////////////////////////
+//boil it down to get the magnitude, phase, and value of before and after
+////////////////////////
+
+//extract the sin and cos of the after harmonic
+var sin_after = harmonicTrendCoefficients_after.select('sin_1');
+var cos_after = harmonicTrendCoefficients_after.select('cos_1');
+
+//calculates the amplitude of after sinosoidal function
+var magnitude_after = cos_after.hypot(sin_after).multiply(5);
+//calculate the phase of the sinosoidal function
+var phase_after = sin_after.atan2(cos_after).unitScale(-Math.PI, Math.PI);
+//calcualtes the mean NDVI value, this is not the mean value used in analysis
+var val_after = after.select('NDVI').reduce('mean');
+
+
+   
+// select the sin and cos before
+var sin_before = harmonicTrendCoefficients_before.select('sin_1');
+var cos_before = harmonicTrendCoefficients_before.select('cos_1');
+
+//calculates the amplitude of after sinosoidal function
+var magnitude_before = cos_before.hypot(sin_before).multiply(5);
+//calculate the phase of the sinosoidal function
+var phase_before = sin_before.atan2(cos_before).unitScale(-Math.PI, Math.PI);
+//calcualtes the mean NDVI value, this is not the mean value used in analysis
+var val_before = before.select('NDVI').reduce('mean');
+
+//calculate the difference between before and after amplitude (magnitude)
+var amp_diff = magnitude_after.subtract(magnitude_before).rename('amplitude_difference');
+
+//difference of the overall means, this is not the mean used in analysis
+var mean_diff = val_after.subtract(val_before).rename('mean_difference');
+
+//////////////////////////
+//calculate the RMSE
+/////////////////////////
+
+//maps functions above to the fitted harmonics
+//caluclates the difference between the fitted ndvi and real value, squares this, and renames this value
+var with_error_after = fittedHarmonic_after
+   .map(diff_of_dependent_and_fitted)
+   .map(square)
+   .select('power').sum().rename('summed power after');
+
+
+
+//maps functions above to the fitted harmonics
+//caluclates the difference between the fitted ndvi and real value, squares this, and renames this value
+var with_error_before = fittedHarmonic_before
+   .map(diff_of_dependent_and_fitted)
+   .map(square)
+   .select('power').sum().rename('summed power before');
+
+
+//adds the standard error as bands of before and after into a single image
+var summed_error = ee.Image(with_error_after.addBands(with_error_before));
+
+//adds the two bands together of the SE image and renames
+var added_error = summed_error.select('summed power before')
+   .add(summed_error.select('summed power after'))
+   .rename('summed power t');
+
+//divides the combined SE with the number cloud free pixels used to estimate the sinosoidal function
+var rmse = added_error.select('summed power t').divide(unmasked_No).sqrt();
+
+
+/////////////////////////////////////////////////
+//calculate the mean prior to and after the assumed point of change
+//////////////////////////////////////////////////
+
+
+
+//to get the mean before and afer the time of change, we must calculate the 
+//coefs without naming them so that they can be extracted
+var one_before = fittedHarmonic_before.map(function(image) {
+  return image.addBands(
+    image.select(independents)
+      .multiply(harmonicTrendCoefficients_before)
+);
+});
+
+//use the default names to select the constant and time and add them, this gives the value of a straight
+//line through the centre of the sinosoidal function
+var two_before = one_before.map(function(image){
+//a constant term 
+  var constant = image.select('constant_1').rename('beta_0');
+//the linear term
+  var time = image.select('t_1').rename('beta_1t');
+  return time.add(constant).rename('trend_before').toFloat()
+    .set('system:time_start', image.get('system:time_start'));
+});
+
+//sort the collection to get the last image before change in the before model 
+var sorted_before = two_before.sort('system:time_start').first(false).select('trend_before')
+
+
+
+//to get the mean before and afer the time of change, we must calculate the 
+//coefs without naming them so that they can be extracted
+var one_after = fittedHarmonic_after.map(function(image) {
+  return image.addBands(
+    image.select(independents)
+      .multiply(harmonicTrendCoefficients_after)
+);
+});
+
+//use the default names to select the constant and time and add them, this gives the value of a straight
+//line through the centre of the sinosoidal function
+var two_after = one_after.map(function(image){
+  var constant = image.select('constant_1').rename('beta_0');
+  var time = image.select('t_1').rename('beta_1t');
+  return time.add(constant).rename('trend_after').toFloat()
+    .set('system:time_start', image.get('system:time_start'));
+});
+
+//sort the collection to get the first image after change in the after model 
+var sorted_after = two_after.sort('system:time_start').first().select('trend_after');
+
+//find the difference in the mean values before and after change
+var trend_difference_at_change = sorted_after.subtract(sorted_before);
+
+///////////////////////////////////////////////////////////////////////////////////////
+
+
+
+
+
+//rename the image with the rmse band added
+var RMSE_again = rmse
+//set the sytem time to the time of the break
+.set({'system:time_start': year_date})
+//names the image as the time of change, and adds the previous steps to one image.  
+//note, in the paper only the RMSE, fitted value, time, amplitude before and after, and mean before and after are used
+.set({name: time.format('YYYY-MM')})
+   .addBands(magnitude_before.rename('amplitude_before'))
+   .addBands(phase_before.rename('phase_before'))
+   .addBands(val_before.rename('overall_mean_before'))
+      .addBands(magnitude_after.rename('amplitude_after'))
+      .addBands(phase_after.rename('phase_after'))
+      .addBands(val_after.rename('overall_mean_after'))
+        .addBands(amp_diff)
+        .addBands(mean_diff.rename('overall_mean_difference'))
+        
+        //these are the means we want to calculate and use for classificaton
+        .addBands(sorted_before).toFloat()
+        .addBands(sorted_after).toFloat()
+        .addBands(trend_difference_at_change.rename('trend_difference'));
+
+
+//combines the fitted values into a single collection, this is so that
+//values of the rmse and fitted value can be displayed as a time series
+var merged = ee.ImageCollection(fittedHarmonic_after.merge(fittedHarmonic_before));
+
+
+//adds the image with the rmse, amplitude, mean, and time to the list
+empty_list= empty_list.add(RMSE_again);
+
+
+
+
+}
+
+print(empty_list, '');
+
+///////////////////
+//computes the sinosoidal function of the whole time period, the assumed no change model
+///////////////////
+
+var one_time = harmonicLandsat.filterDate(start_time, end_time);
+
+var harmonicTrend_all = one_time
+  .select(independents.add(dependent))
+  .reduce(ee.Reducer.robustLinearRegression(independents.length(), 1));
+
+var harmonicTrendCoefficients_all = harmonicTrend_all.select('coefficients')
+  .arrayProject([0])
+  .arrayFlatten([independents]);
+ 
+var fittedHarmonic_all = one_time.map(function(image) {
+  return image.addBands(
+    image.select(independents)
+      .multiply(harmonicTrendCoefficients_all)
+      .reduce('sum')
+      .rename('fitted')
+      .float());
+});
+
+
+var sin_all = harmonicTrendCoefficients_all.select('sin_1');
+var cos_all = harmonicTrendCoefficients_all.select('cos_1');
+
+var magnitude_all = cos_all.hypot(sin_all).multiply(5).rename('amplitude');
+var phase_all = sin_all.atan2(cos_all).unitScale(-Math.PI, Math.PI);
+var val_all = one_time.select('NDVI').reduce('mean');
+
+//calculate the RMSE of the whole time series, the assumed no change, this is now the error image export
+var error_value_all = fittedHarmonic_all
+   .map(diff_of_dependent_and_fitted)
+   .map(square)
+   .mean().select('power').sqrt().rename('RMSE all')
+      .addBands(magnitude_all).toFloat()
+      .addBands(phase_all).toFloat()
+      .addBands(val_all).toFloat();
+   
+   print(error_value_all, 'all error');
+   
+   Map.addLayer(error_value_all, [], 'all error image');
+
+
+
+////////////////////////////////////////////////////////////////////////////////////////
+//converts the list of images from the output of the loop into a collection, as different operations are available
+var all_collection = ee.ImageCollection.fromImages(empty_list);
+////////////////////////////////////////////////////////////////////////////////////////
+
+//////////////////////////////////////////////////////////////
+//create a function which adds the break point time to each pixel
+//////////////////////////////////////////////////////////////
+
+//as the date of the break point is already stored in the metadata, this function adds this as a band to each pixel in the image.
+//this is done so that once the lowest rmse is selected at each location, the break point which 
+//yeilds the lowest rmse, will be preserved in that pixel.  this also allows the period of interest
+//to be selected later by masking times outside of this period
+var addDate = function(image) {
+  // return image.addBands(ee.Image.constant(image.date().millis()).long().rename('time'))
+  
+  //this gets the system time of the harmonic image,
+  //which should be 1985, 1986, 1987... and sets it as a number
+  var dates = ee.Number(image.get('system:time_start'));
+  //this creates a constant image of the year across the whole area so that each
+//pixel can have it set to the date of the image
+    var cons = ee.Image.constant(dates);
+  return image.addBands(cons.rename('time')).float(); 
+};
+
+//maps the function to add a date to each pixel
+var all_with_date = all_collection.map(addDate);
+print(all_with_date, 'all with date');
+
+Map.addLayer(all_with_date, {}, 'all with date');
+
+
+///////////////////////////////////////
+//select the lowest rmse at pixel location from each iteration
+//////////////////////////////////////
+
+// turn image collection into an array
+var date_array = all_with_date.toArray();me
+
+// sort array by the first band (the RMSE), keeping other all bands
+var axes = { image:0, band:1 };
+var sort_array = date_array.arraySlice(axes.band, 0, 1);  // select bands from index 0 to 1 (rmse)
+var sorted_array = date_array.arraySort(sort_array);
+
+
+//get the minimum rmse at each pixel, losing all others
+var min_rmse = sorted_array.arraySlice(axes.image, 0, 1);
+  
+// convert back sorted array back to a single image image  
+var min_rmse_image = min_rmse.arrayProject([axes.band]).arrayFlatten([['summed power t', 
+  'amplitude_before', "phase_before", "overall_mean_before",
+  "amplitude_after", "phase_after", "overall_mean_after", "amplitude_difference", 'overall_mean_difference', 
+  'trend_before', 'trend_after', 'trend_difference', 'time'
+  ]]);
+
+//this is now the image which we will export as the change model
+print(min_rmse_image, 'min_rmse_image')
+
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+
+//adds the chart of the point of interest defined at the start displaying the rmse value of each iteration
+//visually showing the variation in rmse
+print(ui.Chart.image.series((all_with_date
+.select(['summed power t'])), single_pixel, ee.Reducer.mean(), 30)
+    .setOptions({
+      title: 'Harmonic model: rmse',
+      lineWidth: 1,
+      pointSize: 3,
+      maxPixels: 1e88,
+}));
+
+
+//exports the minimum rmse image to google drive
+//sets "no value" to -5
+Export.image.toDrive({
+  image: min_rmse_image.unmask(-5),
+  description: 'change_model',
+  scale: 30,
+  region: roi
+});
+
+//exports the no change model of the whole time period to google drive,
+//sets the "no value" to -5
+Export.image.toDrive({
+  image: error_value_all.unmask(-5),
+  description: 'no_change_model',
+  scale: 30,
+  region: roi
+});
+
+

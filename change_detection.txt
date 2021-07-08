@@ -1,0 +1,115 @@
+//this code uses two inputs which were the output of the previous section of code, and will need
+//to be imported into this code, 
+//namely the RMSE minimum image which assumes change and the no change image. 
+
+//this code serves two functions in our paper, to apply the threshold to the no change image which is 
+//then compared to the change image, to detect change, and secondly to define the period of analysis.  
+//three periods are used, the dates are included as comments below.
+
+ 
+
+
+//define area, needed for export
+var roi = study_area;
+
+//the dates used in our paper are as follows:
+//threshold
+//2003
+//2011
+
+//change detection 
+//2006
+//2014
+
+//time of change analysis
+//2002
+//2014
+
+
+var change_start = ee.Number(2003);
+var change_end = ee.Number(2011)
+
+
+//detect change, this is done in a loop to apply several thresholds at once, and selecting those which are needed
+//the i values are whole numbers as later the image is divided by 100 and multipled by the threshold to equal 
+//multiplying by a decimal value
+// i is the threshold value
+for (var i = 85; i <= 100; i ++){
+
+//sets the threshold as a number
+var threshold = ee.Number(i);
+
+//two input images from the minumum and the error, and names bands
+var min = ee.Image(change_layer)
+.set({'band_1': 'RMSE',
+
+            
+              'band_2': 'amplitude_before',
+              'band_3': 'phase_before',
+              'band_4': 'overall_mean_before',
+              
+              'band_5': 'amplitude_after',
+              'band_6': 'phase_after',
+              'band_7': 'overall_mean_after',
+              
+              'band_8': 'amplitude_difference',
+              'band_9': 'overall_mean_difference',
+              
+              'band_10': 'trend_before',
+              'band_11': 'trend_after',
+              'band_12': 'trend_difference',
+                'band_13': 'time'
+                  });
+
+//the error image
+var error = ee.Image(no_change_layer);
+
+//applies the threshold to the minimum image by dividing the error image by 100 and mulitplying by the threshold, 
+//any pixel in the min image which is less than or equal to the modified error pixel is detected as change. 
+//otherwise the pixel is masked
+var percent_mask = min.select('b1').lte(error.select('b1')
+  .divide(100).multiply(threshold));
+
+//apply the mask to remove pixels which are higher than the threshold value and are considered to not have changed
+var masked_percent = min.updateMask(percent_mask);
+
+
+
+////////////////////////////////////////////////////////////////////////
+//define the period for when we wish to detect change.  the above code detects any change, now 
+//we select the change in our time period and disregard the rest as no change
+///////////////////////////////////////////////////////////////////////
+
+//creates a mask which selects the years you want to look at
+// the first few lines is greater than or equal to, this is the lower date because it selects all the dates above this, 
+// and masks anything below.  similarly the second few lines removes dates above it and keeps dates less than or equal to
+// the maximum date.  below are reminders of the dates we used and in which section
+var before = masked_percent.select('b13').gte(change_start);
+var before_removed = masked_percent.updateMask(before);
+
+
+
+var after = before_removed.select('b13').lte(change_end);
+var after_image = before_removed.updateMask(after);
+
+//adds the threshold as a metadata property.
+var added_threshold = after_image.set({'threshold': i});
+
+
+//maps the image naming it with the threshold
+Map.addLayer(added_threshold, {}, 'after_image'+i.toString(), false);
+
+//export the image to google drive.  as before, no data is set to -5.  the string in the name is ammendable, 
+//although it is suggested to leave the threshold value (i) within the name
+Export.image.toDrive({
+  image: added_threshold.unmask(-5),
+  description: 'threshold_value_'+i.toString(),
+  scale: 30,
+  region: roi
+});
+
+print(added_threshold);
+
+}
+//////////////////////////////////////////////////////////////////////////////////
+
