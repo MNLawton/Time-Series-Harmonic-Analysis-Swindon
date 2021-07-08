@@ -23,6 +23,7 @@ This workflow uses GEE
     14. Run the script
     N.B. The number of images exported will depend on the number of threshold iterations desired.  Dates used in the paper are found as comments within this code file. 
     15. These layers are exported to google drive 
+    N.B. Images of varying thresholds tested to find the most appropreate threshold are found in the folder "threshold".  The "validation image" uses a threshold of 0.93 and was the image used to compare with the PCC of LCM 2007 and 2015 ("PC_change_detection_reclassified" where 1 = change).  "time_of_change" uses a threshold of 0.93 and was used to test the accuracy of the models dating capability.
     
     
     In a new script open “classification”
@@ -31,3 +32,4 @@ This workflow uses GEE
     18. Define your study area (this is automatically named “geometry”)
     19. Run the script
     20. Image is exported to google drive
+    N.B. This results in "classified_image".  
