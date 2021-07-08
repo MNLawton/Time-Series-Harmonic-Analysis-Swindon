@@ -33,3 +33,11 @@ This workflow uses GEE
     19. Run the script
     20. Image is exported to google drive
     N.B. This results in "classified_image".  
+    
+    
+    To count cloud proportion:
+    1. Open counting clouds
+    2. Define your area of interest
+    3. Define your start time and end time
+    4. Run script, image is exported to google drive
+    N.B. This results in "number_of_clouds"
